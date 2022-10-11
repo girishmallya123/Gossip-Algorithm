@@ -1,32 +1,86 @@
 -module(gossip).
--export([start_main/1, spawn_main_actor/5, spawn_child_node/6]).
+-export([start_main/1, spawn_main_actor/5, spawn_child_node/8]).
 -import(math, [pow/2]).
 
-spawn_child_node(N, RumorCt, Neighbors, Parent, S, V) ->
+minimum([]) -> io:format("can not find minimum of empty list~n");
+
+minimum([H|T])  ->
+        minimum(H, T).
+
+minimum(Min, [H|T]) ->
+        case Min < H of
+                true -> minimum(Min, T);
+                false -> minimum(H, T)
+        end;
+
+minimum(Min, []) -> Min.
+
+
+maximum([])     -> io:format("can not find max from empty list~n");
+maximum([H|T])  ->
+                maximum(H, T).
+
+maximum(Max, [H|T])     ->
+                        case Max > H of
+                        true    -> maximum(Max, T);
+                        false   -> maximum(H, T)
+                        end;
+maximum(Max, [])        -> Max.
+
+spawn_child_node(N, RumorCt, Neighbors, Parent, Protocol, S, V, Deltas) ->
     receive
+        {ping} -> 
+            send_message(Parent, {pong, S, V, self()}),
+            spawn_child_node(N, RumorCt, Neighbors, Parent, Protocol, S, V, Deltas);
+
         {update_parent, P} ->
-            spawn_child_node(N, RumorCt, Neighbors, P, S, V);
+            spawn_child_node(N, RumorCt, Neighbors, P, Protocol, S, V, Deltas);
 
         {update_neighbor, NV} ->
-            spawn_child_node(N, RumorCt, NV, Parent, S , V);
+            spawn_child_node(N, RumorCt, NV, Parent, Protocol, S , V, Deltas);
 
-        {rumor} ->
+        {rumor, ReceivedS, ReceivedV} ->
+            NewS = S + ReceivedS,
+            NewV = V + ReceivedV,
+
             if 
-                RumorCt == 10 ->
-                    send_message(Parent, {kill_me, self()});
-                true ->
-                    send_message(self(), {spread_rumor}),
-                    spawn_child_node(N, RumorCt+1, Neighbors, Parent, S, V)
-            end;
-        {spread_rumor} ->
+                Protocol == push_sum ->
+                    Ratio = NewS / NewV,
+                    if 
+                        length(Deltas) == 3 ->
+                            {Left, [_|Right]} = lists:split(0, Deltas),
+                            NewDeltas = Left ++ Right ++ [Ratio];
+                        true ->
+                            NewDeltas = Deltas ++ [Ratio]
+                    end,
+                    DeltaDifferential = maximum(NewDeltas) - minimum(NewDeltas),
+                    TerminationConst = pow(10, -10),
+                    if 
+                        (length(Deltas) == 3) and (DeltaDifferential =< TerminationConst) ->
+                            send_message(Parent, {kill_me, self()});
+                        true ->
+                            send_message(self(), {spread_rumor, NewS / 2, NewV / 2}),
+                            spawn_child_node(N, RumorCt+1, Neighbors, Parent, Protocol, NewS/2, NewV/2, NewDeltas)
+                    end;
+            true ->
+                if 
+                    RumorCt == 10 ->
+                        send_message(Parent, {kill_me, self()});
+                    true ->
+                        send_message(self(), {spread_rumor, ReceivedS, ReceivedV}),
+                        spawn_child_node(N, RumorCt+1, Neighbors, Parent, Protocol, S, V, Deltas)
+                end
+        end;
+
+        {spread_rumor, RecS, RecV} ->
             Random_Neighbor = lists:nth(rand:uniform(length(Neighbors)), Neighbors),
             if
                 Random_Neighbor == self() ->
-                    send_message(self(), {spread_rumor}),
-                    spawn_child_node(N, RumorCt, Neighbors, Parent, S, V);
+                    send_message(self(), {spread_rumor, S, V}),
+                    spawn_child_node(N, RumorCt, Neighbors, Parent, Protocol, S, V, Deltas);
                 true ->
-                    send_message(Random_Neighbor, {rumor}),
-                    spawn_child_node(N, RumorCt, Neighbors, Parent, S, V)
+                    send_message(Random_Neighbor, {rumor, RecS, RecV}),
+                    spawn_child_node(N, RumorCt, Neighbors, Parent, Protocol, RecS, RecV, Deltas)
             end
     end.
 
@@ -170,6 +224,9 @@ send_message(Pid, Msg) ->
 
 gossip_handler(Child_actors, K, StartTime, N, Protocol, Topology) ->
     receive
+        {pong, S, V, ActorPID} ->
+            send_message(ActorPID, {rumor, S, V}),
+            gossip_handler(Child_actors, K, StartTime, N, Protocol, Topology);
         {initialize} ->
             send_message(self(), {update_parent}),
             gossip_handler(Child_actors, K, StartTime, N, Protocol, Topology);
@@ -199,7 +256,7 @@ gossip_handler(Child_actors, K, StartTime, N, Protocol, Topology) ->
                     ok
             end,
             Random_child = lists:nth(rand:uniform(length(Children)), Children),
-            send_message(Random_child, {rumor}),
+            send_message(Random_child, {ping}),
             gossip_handler(Child_actors, K, StartTime, N, Protocol, Topology);
         
         {update_parent} ->
@@ -227,7 +284,7 @@ spawn_main_actor(Actor_Index, Child_actors, N, Protocol, Topology) ->
             S = 0, 
             V = 0
     end,
-    Pid = spawn(gossip, spawn_child_node, [Actor_Index, 0, [], 0, S, V]),
+    Pid = spawn(gossip, spawn_child_node, [Actor_Index, 0, [], 0, Protocol, S, V, []]),
     spawn_main_actor(Actor_Index-1, Child_actors++[Pid],N, Protocol, Topology).
 
 start_main(Args) -> 
